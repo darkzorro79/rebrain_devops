@@ -1,0 +1,69 @@
+# Описываем наши стадии
+stages:
+- test
+- build
+- deploy
+
+# Задача на запуск линтера
+test:lint:
+  # Относится к стадии тестирования
+  stage: test
+  # Разрешаем фейлится этой задаче
+  allow_failure: true
+  before_script:
+    # Устанавливаем curl / wget
+    - apt-get update && apt-get install -y curl wget
+    # Устанавливаем node version manager
+    - curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | bash
+    # Подключаем node version manager
+    - source "$HOME/.nvm/nvm.sh"
+    # Устаналиваем nodejs последней lts версии
+    - nvm install v22.14.0
+  script:
+    # Устанавливаем зависимости нашего приложения
+    - npm install
+    # Запускаем проверку кода через линтер
+    - npm run lint
+
+# Задача по сборке нашего приложения
+build:app:
+  # Относится к стадии build
+  stage: build
+  # Устанавливаем nvm и nodejs аналогично задаче с линтером
+  before_script:
+    - apt-get update && apt-get install -y curl wget
+    - curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | bash
+    - source "$HOME/.nvm/nvm.sh"
+    - nvm install v22.14.0
+  script:
+    # Устанавливаем зависимости
+    - npm install
+    # Собираем приложение
+    - npm run build
+  # Сохраняем директорию dist, в которой лежит наше собранное приложение index.html, *.css и *.js файлы
+  artifacts:
+    paths:
+      - dist/
+
+# Задача на деплой нашего приложения
+deploy:app:
+  # Относится к стадии deploy
+  stage: deploy
+  # Устанавливаем ssh-agent и добавляем наши ключи аналогично back и worker приложениям
+  before_script:
+  - 'command -v ssh-agent >/dev/null || ( apt-get update -y && apt-get install openssh-client -y )'
+  - eval $(ssh-agent -s)
+  - cat ${SSH_PRIVATE_KEY}
+  - chmod 400 ${SSH_PRIVATE_KEY}
+  - ssh-add ${SSH_PRIVATE_KEY}
+  - mkdir -p ~/.ssh
+  - chmod 700 ~/.ssh
+  - ssh-keyscan -H ${APP_HOST} >> ~/.ssh/known_hosts
+  script:
+    # Дополнительно устанавливаем rsync
+    - apt-get install -y rsync
+    # Меняем путь назначения на /opt/front
+    - rsync -av --progress dist/ front@${APP_HOST}:/opt/front/
+  # Указываем, что нам нужны артефакты из задачи по сборке приложения
+  needs:
+    - build:app

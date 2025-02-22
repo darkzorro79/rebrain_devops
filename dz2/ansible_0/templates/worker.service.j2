@@ -1,0 +1,14 @@
+[Unit]
+Description=Todo Worker Service
+After=network.target postgresql.service
+
+[Service]
+Type=simple
+User=worker
+WorkingDirectory={{ worker_dir }}
+Environment=PATH={{ worker_dir }}/venv/bin:${PATH}
+ExecStart={{ worker_dir }}/venv/bin/python3 cleaner.py
+Restart=always
+
+[Install]
+WantedBy=multi-user.target 

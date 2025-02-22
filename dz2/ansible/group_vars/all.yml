@@ -1,0 +1,14 @@
+---
+# GitLab configuration
+gitlab_token: "{{ vault_gitlab_token }}"
+gitlab_url: "https://rbr-devops-workshop.gitlab.yandexcloud.net"
+
+# Repository URLs
+back_repo: "{{ gitlab_url }}/admin-kropalik-ru/back.git"
+front_repo: "{{ gitlab_url }}/admin-kropalik-ru/front.git"
+worker_repo: "{{ gitlab_url }}/admin-kropalik-ru/worker.git"
+
+# Project paths
+back_path: /opt/repos/back
+front_path: /opt/repos/front
+worker_path: /opt/repos/worker 

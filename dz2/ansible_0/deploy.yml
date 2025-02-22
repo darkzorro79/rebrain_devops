@@ -1,0 +1,426 @@
+---
+- name: Развертывание веб-проекта
+  hosts: rebraindev
+  become: yes
+  vars:
+    db_name: todo
+    db_user: todo
+    db_password: "{{ vault_db_password }}"
+    frontend_dir: /opt/front
+    backend_dir: /opt/back
+    worker_dir: /opt/worker
+
+  tasks:
+    # Базовые инструменты
+    - name: Установка Git
+      apt:
+        name: git
+        state: present
+        update_cache: yes
+
+    # Docker
+    - name: Установка зависимостей для Docker
+      apt:
+        name:
+          - ca-certificates
+          - curl
+          - gnupg
+        state: present
+
+    - name: Добавление GPG ключа Docker
+      apt_key:
+        url: https://download.docker.com/linux/ubuntu/gpg
+        state: present
+
+    - name: Добавление репозитория Docker
+      apt_repository:
+        repo: deb [arch=amd64] https://download.docker.com/linux/ubuntu {{ ansible_distribution_release }} stable
+        state: present
+        filename: docker
+
+    - name: Установка Docker
+      apt:
+        name:
+          - docker-ce
+          - docker-ce-cli
+          - containerd.io
+          - docker-buildx-plugin
+          - docker-compose-plugin
+        state: present
+        update_cache: yes
+
+    - name: Запуск и включение сервиса Docker
+      service:
+        name: docker
+        state: started
+        enabled: yes
+
+    # PostgreSQL
+    - name: Добавление PostgreSQL репозитория
+      apt:
+        name: 
+          - curl
+          - ca-certificates
+          - gnupg
+        state: present
+
+    - name: Добавление GPG ключа PostgreSQL
+      apt_key:
+        url: https://www.postgresql.org/media/keys/ACCC4CF8.asc
+        state: present
+
+    - name: Добавление PostgreSQL репозитория
+      apt_repository:
+        repo: deb https://apt.postgresql.org/pub/repos/apt {{ ansible_distribution_release }}-pgdg main
+        state: present
+        filename: pgdg
+
+    - name: Установка PostgreSQL 16
+      apt:
+        name: 
+          - postgresql-16
+          - postgresql-contrib-16
+          - python3-psycopg2
+        state: present
+        update_cache: yes
+
+    - name: Запуск и включение сервиса PostgreSQL
+      service:
+        name: postgresql
+        state: started
+        enabled: yes
+
+    - name: Создание пользователя БД
+      shell: |
+        sudo -u postgres psql -c "CREATE USER {{ db_user }} WITH PASSWORD '{{ db_password }}' CREATEDB LOGIN;"
+      args:
+        creates: "/var/lib/postgresql/{{ db_user }}"
+      ignore_errors: yes
+
+    - name: Создание базы данных
+      shell: |
+        sudo -u postgres psql -c "CREATE DATABASE {{ db_name }} OWNER {{ db_user }};"
+      args:
+        creates: "/var/lib/postgresql/{{ db_name }}"
+      ignore_errors: yes
+
+    - name: Создание расширения uuid-ossp
+      shell: |
+        sudo -u postgres psql -d {{ db_name }} -c "CREATE EXTENSION IF NOT EXISTS \"uuid-ossp\";"
+      ignore_errors: yes
+
+    # Golang Backend
+    - name: Загрузка Go
+      get_url:
+        url: https://go.dev/dl/go1.23.6.linux-amd64.tar.gz
+        dest: /opt/go1.23.6.linux-amd64.tar.gz
+        mode: '0644'
+
+    - name: Удаление старой версии Go
+      file:
+        path: /usr/local/go
+        state: absent
+
+    - name: Установка Go
+      unarchive:
+        src: /opt/go1.23.6.linux-amd64.tar.gz
+        dest: /usr/local
+        remote_src: yes
+
+    - name: Добавление Go в PATH
+      lineinfile:
+        path: /root/.bashrc
+        line: 'export PATH=$PATH:/usr/local/go/bin'
+        state: present
+
+    - name: Применение изменений PATH
+      shell: source /root/.bashrc
+      args:
+        executable: /bin/bash
+
+    - name: Удаление архива Go
+      file:
+        path: /opt/go1.23.6.linux-amd64.tar.gz
+        state: absent
+
+    - name: Создание пользователя back
+      user:
+        name: back
+        shell: /bin/bash
+        create_home: yes
+        state: present
+
+    - name: Создание директории для бэкенда
+      file:
+        path: "{{ backend_dir }}"
+        state: directory
+        owner: back
+        group: back
+        mode: '0775'
+        recurse: yes
+
+    - name: Добавление Go в PATH для пользователя back
+      lineinfile:
+        path: /home/back/.bashrc
+        line: 'export PATH=$PATH:/usr/local/go/bin'
+        state: present
+
+    - name: Применение изменений PATH для пользователя back
+      shell: |
+        sudo -u back bash -c 'source /home/back/.bashrc'
+      args:
+        executable: /bin/bash
+
+    - name: Проверка существования директории бэкенда
+      stat:
+        path: "{{ backend_dir }}/.git"
+      register: backend_git_dir
+
+    - name: Удаление директории бэкенда если .git отсутствует
+      file:
+        path: "{{ backend_dir }}"
+        state: absent
+      when: not backend_git_dir.stat.exists
+
+    - name: Пересоздание директории для бэкенда
+      file:
+        path: "{{ backend_dir }}"
+        state: directory
+        owner: back
+        group: back
+        mode: '0775'
+      when: not backend_git_dir.stat.exists
+
+    - name: Клонирование репозитория бэкенда
+      shell: |
+        sudo -u back git clone https://rbr-devops-workshop.gitlab.yandexcloud.net/rbr-todo/back.git {{ backend_dir }}
+      when: not backend_git_dir.stat.exists
+
+    - name: Установка модулей Go
+      shell: |
+        cd {{ backend_dir }}
+        sudo -u back bash -c 'export PATH=$PATH:/usr/local/go/bin && go mod download'
+      args:
+        executable: /bin/bash
+
+    - name: Сборка бэкенда
+      shell: |
+        cd {{ backend_dir }}
+        sudo -u back bash -c 'export PATH=$PATH:/usr/local/go/bin && go build -o app *.go'
+      args:
+        executable: /bin/bash
+      environment:
+        GOPATH: "{{ backend_dir }}"
+
+    - name: Создание systemd сервиса для бэкенда
+      template:
+        src: templates/backend.service.j2
+        dest: /etc/systemd/system/backend.service
+      notify: reload systemd
+
+    - name: Запуск и включение сервиса бэкенда
+      systemd:
+        name: backend
+        state: started
+        enabled: yes
+
+    - name: Обновление прав для директории бэкенда
+      file:
+        path: "{{ backend_dir }}"
+        owner: back
+        group: back
+        mode: '0775'
+        recurse: yes
+
+    # NodeJS Frontend
+    - name: Создание пользователя front
+      user:
+        name: front
+        shell: /bin/bash
+        create_home: yes
+        state: present
+
+    - name: Установка NVM
+      shell: |
+        sudo -u front bash -c 'curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | bash'
+      args:
+        creates: /home/front/.nvm/nvm.sh
+
+    - name: Установка Node.js
+      shell: |
+        sudo -u front bash -c 'source /home/front/.nvm/nvm.sh && nvm install v22.13.1'
+      args:
+        executable: /bin/bash
+
+    - name: Создание директории для фронтенда
+      file:
+        path: "{{ frontend_dir }}"
+        state: directory
+        owner: front
+        group: front
+        mode: '0775'
+        recurse: yes
+
+    - name: Проверка существования директории фронтенда
+      stat:
+        path: "{{ frontend_dir }}/.git"
+      register: frontend_git_dir
+
+    - name: Удаление директории фронтенда если .git отсутствует
+      file:
+        path: "{{ frontend_dir }}"
+        state: absent
+      when: not frontend_git_dir.stat.exists
+
+    - name: Пересоздание директории для фронтенда
+      file:
+        path: "{{ frontend_dir }}"
+        state: directory
+        owner: front
+        group: front
+        mode: '0775'
+      when: not frontend_git_dir.stat.exists
+
+    - name: Клонирование репозитория фронтенда
+      shell: |
+        sudo -u front git clone https://rbr-devops-workshop.gitlab.yandexcloud.net/rbr-todo/front.git {{ frontend_dir }}
+      when: not frontend_git_dir.stat.exists
+
+    - name: Установка зависимостей фронтенда
+      shell: |
+        sudo -u front bash -c 'source /home/front/.nvm/nvm.sh && cd {{ frontend_dir }} && npm install'
+      args:
+        executable: /bin/bash
+
+    - name: Сборка фронтенда
+      shell: |
+        sudo -u front bash -c 'source /home/front/.nvm/nvm.sh && cd {{ frontend_dir }} && npm run build'
+      args:
+        executable: /bin/bash
+
+    - name: Обновление прав для директории фронтенда
+      file:
+        path: "{{ frontend_dir }}"
+        owner: front
+        group: front
+        mode: '0775'
+        recurse: yes
+
+    # Python Worker
+    - name: Установка Python и зависимостей
+      apt:
+        name:
+          - python3
+          - python3-pip
+          - python3-venv
+          - build-essential
+          - libpq-dev
+          - python3-dev
+        state: present
+
+    - name: Создание пользователя worker
+      user:
+        name: worker
+        shell: /bin/bash
+        create_home: yes
+        state: present
+
+    - name: Создание директории для worker
+      file:
+        path: "{{ worker_dir }}"
+        state: directory
+        owner: worker
+        group: worker
+        mode: '0775'
+        recurse: yes
+
+    - name: Проверка существования директории worker
+      stat:
+        path: "{{ worker_dir }}/.git"
+      register: worker_git_dir
+
+    - name: Удаление директории worker если .git отсутствует
+      file:
+        path: "{{ worker_dir }}"
+        state: absent
+      when: not worker_git_dir.stat.exists
+
+    - name: Пересоздание директории для worker
+      file:
+        path: "{{ worker_dir }}"
+        state: directory
+        owner: worker
+        group: worker
+        mode: '0775'
+      when: not worker_git_dir.stat.exists
+
+    - name: Клонирование репозитория worker
+      shell: |
+        sudo -u worker git clone https://rbr-devops-workshop.gitlab.yandexcloud.net/rbr-todo/worker.git {{ worker_dir }}
+      when: not worker_git_dir.stat.exists
+
+    - name: Создание виртуального окружения и установка зависимостей
+      shell: |
+        sudo -u worker bash -c 'python3 -m venv {{ worker_dir }}/venv && source {{ worker_dir }}/venv/bin/activate && pip3 install -r {{ worker_dir }}/requirements.txt'
+      args:
+        executable: /bin/bash
+
+    - name: Создание systemd сервиса для worker
+      template:
+        src: templates/worker.service.j2
+        dest: /etc/systemd/system/worker.service
+      notify: reload systemd
+
+    - name: Запуск и включение сервиса worker
+      systemd:
+        name: worker
+        state: started
+        enabled: yes
+
+    - name: Обновление прав для директории worker
+      file:
+        path: "{{ worker_dir }}"
+        owner: worker
+        group: worker
+        mode: '0775'
+        recurse: yes
+
+    # Nginx
+    - name: Установка Nginx
+      apt:
+        name: nginx
+        state: present
+
+    - name: Настройка Nginx
+      template:
+        src: templates/nginx.conf.j2
+        dest: /etc/nginx/sites-available/webapp
+      notify: restart nginx
+
+    - name: Создание символической ссылки для конфига Nginx
+      file:
+        src: /etc/nginx/sites-available/webapp
+        dest: /etc/nginx/sites-enabled/webapp
+        state: link
+      notify: restart nginx
+
+    - name: Удаление дефолтного конфига
+      file:
+        path: /etc/nginx/sites-enabled/default
+        state: absent
+      notify: restart nginx
+
+    - name: Установка прав доступа для директории front
+      file:
+        path: /home/front
+        mode: '0755'
+        state: directory
+
+  handlers:
+    - name: restart nginx
+      service:
+        name: nginx
+        state: restarted
+    - name: reload systemd
+      systemd:
+        daemon_reload: yes 

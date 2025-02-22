@@ -1,0 +1,224 @@
+---
+- name: Setup CI/CD environment
+  hosts: all
+  become: yes
+  vars:
+    gitlab_url: "https://rbr-devops-workshop.gitlab.yandexcloud.net"
+    projects:
+      - { name: "back", path: "/opt/repos/back" }
+      - { name: "front", path: "/opt/repos/front" }
+      - { name: "worker", path: "/opt/repos/worker" }
+
+  tasks:
+    - name: Create users
+      user:
+        name: "{{ item }}"
+        shell: /bin/bash
+        create_home: yes
+        state: present
+      loop:
+        - back
+        - front
+        - worker
+
+    - name: Create .ssh directories
+      file:
+        path: "/home/{{ item }}/.ssh"
+        state: directory
+        owner: "{{ item }}"
+        group: "{{ item }}"
+        mode: '0700'
+      loop:
+        - back
+        - front
+        - worker
+
+    - name: Generate SSH keys for users
+      openssh_keypair:
+        path: "/home/{{ item }}/.ssh/id_ed25519"
+        type: ed25519
+        state: present
+        force: no
+        owner: "{{ item }}"
+        group: "{{ item }}"
+        mode: '0600'
+      loop:
+        - back
+        - front
+        - worker
+
+    - name: Wait for keys to be generated
+      wait_for:
+        path: "/home/{{ item }}/.ssh/id_ed25519.pub"
+        state: present
+        timeout: 10
+      loop:
+        - back
+        - front
+        - worker
+
+    - name: Ensure proper permissions on public keys
+      file:
+        path: "/home/{{ item }}/.ssh/id_ed25519.pub"
+        owner: "{{ item }}"
+        group: "{{ item }}"
+        mode: '0644'
+      loop:
+        - back
+        - front
+        - worker
+
+    - name: Read public keys
+      slurp:
+        src: "/home/{{ item }}/.ssh/id_ed25519.pub"
+      register: ssh_pub_keys
+      loop:
+        - back
+        - front
+        - worker
+
+    - name: Copy public keys to authorized_keys
+      authorized_key:
+        user: "{{ item.0 }}"
+        state: present
+        key: "{{ item.1.content | b64decode }}"
+      loop: "{{ ['back', 'front', 'worker'] | zip(ssh_pub_keys.results) | list }}"
+
+    - name: Show public keys
+      debug:
+        msg: "Public key for {{ item.0 }}: {{ item.1.content | b64decode }}"
+      loop: "{{ ['back', 'front', 'worker'] | zip(ssh_pub_keys.results) | list }}"
+
+    - name: Configure sudoers
+      lineinfile:
+        path: /etc/sudoers
+        line: "{{ item }} ALL=(ALL) NOPASSWD: /bin/systemctl restart {{ item }}"
+        validate: 'visudo -cf %s'
+      loop:
+        - back
+        - worker
+
+    - name: Create repos directory
+      file:
+        path: /opt/repos
+        state: directory
+        mode: '0755'
+        owner: root
+        group: root
+
+    - name: Create project directories
+      file:
+        path: "{{ item.path }}"
+        state: directory
+        owner: "{{ item.name }}"
+        group: "{{ item.name }}"
+        mode: '0755'
+      loop: "{{ projects }}"
+
+    - name: Configure Git safe directories
+      shell: |
+        git config --global --add safe.directory {{ item.path }}
+      loop: "{{ projects }}"
+
+    - name: Clone repositories
+      git:
+        repo: "https://oauth2:{{ vault_gitlab_token }}@rbr-devops-workshop.gitlab.yandexcloud.net/admin-kropalik-ru/{{ item.name }}.git"
+        dest: "{{ item.path }}"
+        accept_hostkey: yes
+      loop: "{{ projects }}"
+
+    - name: Set repository ownership
+      file:
+        path: "{{ item.path }}"
+        state: directory
+        owner: "{{ item.name }}"
+        group: "{{ item.name }}"
+        recurse: yes
+      loop: "{{ projects }}"
+
+    - name: Copy gitlab-ci files
+      template:
+        src: "templates/{{ item.name }}-gitlab-ci.yml.j2"
+        dest: "{{ item.path }}/.gitlab-ci.yml"
+        owner: "{{ item.name }}"
+        group: "{{ item.name }}"
+        mode: '0644'
+        force: yes
+      loop: "{{ projects }}"
+
+    - name: Configure git for repositories
+      shell: |
+        cd {{ item.path }} && \
+        git config --local user.email "ansible@example.com" && \
+        git config --local user.name "Ansible Automation" && \
+        git remote set-url origin "https://oauth2:{{ vault_gitlab_token }}@rbr-devops-workshop.gitlab.yandexcloud.net/admin-kropalik-ru/{{ item.name }}.git"
+      loop: "{{ projects }}"
+
+    - name: Push gitlab-ci files back to repositories
+      shell: |
+        cd {{ item.path }} && \
+        git add .gitlab-ci.yml && \
+        git commit -m "Add gitlab-ci configuration" || true && \
+        git push origin main || true
+      loop: "{{ projects }}"
+
+    - name: Fix repository permissions again
+      file:
+        path: "{{ item.path }}"
+        state: directory
+        owner: "{{ item.name }}"
+        group: "{{ item.name }}"
+        recurse: yes
+      loop: "{{ projects }}"
+
+    - name: Read private keys
+      command: "cat /home/{{ item }}/.ssh/id_ed25519"
+      register: ssh_private_keys
+      loop:
+        - back
+        - front
+        - worker
+
+    - name: Set GitLab CI/CD SSH keys (file type)
+      uri:
+        url: "{{ gitlab_url }}/api/v4/projects/admin-kropalik-ru%2F{{ item.project }}/variables"
+        method: POST
+        headers:
+          PRIVATE-TOKEN: "{{ vault_gitlab_token }}"
+        body_format: json
+        body:
+          variable_type: "file"
+          key: "{{ item.key }}"
+          value: "{{ item.value }}"
+        status_code: [201, 400]
+      loop:
+        - { project: "back", key: "SSH_PRIVATE_KEY", value: "{{ (ssh_private_keys.results | selectattr('item', 'equalto', 'back') | first).stdout }}" }
+        - { project: "front", key: "SSH_PRIVATE_KEY", value: "{{ (ssh_private_keys.results | selectattr('item', 'equalto', 'front') | first).stdout }}" }
+        - { project: "worker", key: "SSH_PRIVATE_KEY", value: "{{ (ssh_private_keys.results | selectattr('item', 'equalto', 'worker') | first).stdout }}" }
+      register: ssh_key_results
+
+    - name: Debug SSH key results
+      debug:
+        var: ssh_key_results
+
+    - name: Set GitLab CI/CD APP_HOST (variable type)
+      uri:
+        url: "{{ gitlab_url }}/api/v4/projects/admin-kropalik-ru%2F{{ item.project }}/variables"
+        method: POST
+        headers:
+          PRIVATE-TOKEN: "{{ vault_gitlab_token }}"
+        body_format: json
+        body:
+          variable_type: "env_var"
+          key: "APP_HOST"
+          value: "{{ ansible_host }}"
+        status_code: [201, 400]
+      loop:
+        - { project: "back" }
+        - { project: "front" }
+        - { project: "worker" }
+      register: app_host_results
+
+    - name: Debug APP_HOST results
+      debug:
+        var: app_host_results 

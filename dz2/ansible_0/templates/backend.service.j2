@@ -1,0 +1,13 @@
+[Unit]
+Description=Backend Service
+After=network.target
+
+[Service]
+Type=simple
+User=back
+WorkingDirectory={{ backend_dir }}
+ExecStart={{ backend_dir }}/app
+Restart=always
+
+[Install]
+WantedBy=multi-user.target 

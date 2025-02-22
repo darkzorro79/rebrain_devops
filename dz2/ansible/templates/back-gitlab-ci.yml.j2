@@ -1,0 +1,83 @@
+# Описываем три стадии тестирования, сборки и деплоя
+stages:
+- test
+- build
+- deploy
+
+# Задача на запуск линтера
+test:lint:
+  # Относится к стадии тестирования
+  stage: test
+  # Разрешаем задаче сломаться (завершиться не с нулевым кодом выхода)
+  # Если убрать эту строчку, то при неуспешном прохождении тестов дальнейшие шаги
+  # запущены не будут. То есть гитлаб просто остановится на этой стадии и не пойдёт дальше.
+  allow_failure: true
+  # На самом деле before_script и script не отличаются,  это используется только в инклудах
+  # Но мы разделили эти задачи для наглядности
+  before_script:
+    # Устанавливаем curl, wget
+    - apt-get update && apt-get install -y curl wget
+    # Устанавливаем golang - подробнее можно посмотреть здесь - https://go.dev/doc/install
+    - wget https://go.dev/dl/go1.24.0.linux-amd64.tar.gz && rm -rf /usr/local/go && tar -C /usr/local -xzf go1.24.0.linux-amd64.tar.gz && rm -f go1.24.0.linux-amd64.tar.gz
+    # Обновляем переменную PATH, чтобы был доступен комплятор `go`
+    - export PATH=$PATH:/usr/local/go/bin:/root/go/bin
+  script:
+    # Устанавливаем golangci-lint - подробнее здесь - https://golangci-lint.run/welcome/install/
+    - curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b $(go env GOPATH)/bin v1.63.4
+    # Запускаем проверку нашего кода
+    - golangci-lint run -v
+
+# Задача на сборку приложения
+build:app:
+  # Относится к стадии сборки
+  stage: build
+  # Устанавливаем golang - полностью аналогично задаче с тестами
+  before_script:
+    - apt-get update && apt-get install -y curl wget
+    - wget https://go.dev/dl/go1.24.0.linux-amd64.tar.gz && rm -rf /usr/local/go && tar -C /usr/local -xzf go1.24.0.linux-amd64.tar.gz && rm -f go1.24.0.linux-amd64.tar.gz
+    - export PATH=$PATH:/usr/local/go/bin
+  script:
+    # Скачиваем модули (зависимости)
+    - go mod download
+    # Компилируем исходники в app приложение
+    - go build -o app *.go
+  # Инструктируем gitlab, что по завершению этой задачи необходимо сохранить
+  # файл `app` в артефакты. Поскольку мы не используем какого-то внешнего хранилища
+  # то нам необходимо передать данный файл в следующую задачу на деплой.
+  artifacts:
+    paths:
+      - app
+
+# Задача на обновление приложения
+deploy:app:
+  # Относится к стадии деплой
+  stage: deploy
+  before_script:
+  # Проверяем установлен ли у нас ssh-agent и если нет - устанавливаем его
+  - 'command -v ssh-agent >/dev/null || ( apt-get update -y && apt-get install openssh-client libssl3 -y )'
+  # Запуска ssh-agent
+  - eval $(ssh-agent -s)
+  # Для дебага - выводим значение нашей переменной SSH_PRIVATE_KEY
+  - cat ${SSH_PRIVATE_KEY}
+  # Выставляем права на файл 0400
+  - chmod 400 ${SSH_PRIVATE_KEY}
+  # Добавляем приватный ключ в ssh-agent
+  - ssh-add ${SSH_PRIVATE_KEY}
+  # Создаем директорию для ssh - там будут храниться known_hosts
+  - mkdir -p ~/.ssh
+  # Задаем права на директорию 700
+  - chmod 700 ~/.ssh
+  # Сохраняем публичные ключи нашего сервера - чтобы при 
+  # scp и ssh командах нас не спрашивали доверяем ли мы этому серверу
+  - ssh-keyscan -H ${APP_HOST} >> ~/.ssh/known_hosts
+  script:
+    # Копируем наш бинарный файл `app` на сервер под пользователем `back`
+    - scp app back@$APP_HOST:/tmp/app
+    # Подключаемся к серверу, останавливаем приложение, перемещаем бинарник и запускаем сервис
+    - ssh back@$APP_HOST 'sudo systemctl stop backend && mv /tmp/app /opt/back/app && sudo systemctl start backend'
+  # Говорим гитлабу, что нам необходимы артефакты из задачи по сборке, которые мы там сохраняли
+  # Гилаб при запуске этой задаче заберет сохраненные артефакты и положит их в текущую директорию
+  # В нашем случае это файл `app`
+  needs:
+    - build:app
+    
