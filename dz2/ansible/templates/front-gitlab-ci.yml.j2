@@ -51,19 +51,19 @@ deploy:app:
   stage: deploy
   # Устанавливаем ssh-agent и добавляем наши ключи аналогично back и worker приложениям
   before_script:
-  - 'command -v ssh-agent >/dev/null || ( apt-get update -y && apt-get install openssh-client -y )'
-  - eval $(ssh-agent -s)
-  - cat ${SSH_PRIVATE_KEY}
-  - chmod 400 ${SSH_PRIVATE_KEY}
-  - ssh-add ${SSH_PRIVATE_KEY}
-  - mkdir -p ~/.ssh
-  - chmod 700 ~/.ssh
-  - ssh-keyscan -H ${APP_HOST} >> ~/.ssh/known_hosts
+    - 'command -v ssh-agent >/dev/null || ( apt-get update -y && apt-get install openssh-client -y )'
+    - eval $(ssh-agent -s)
+    - cat ${SSH_PRIVATE_KEY}
+    - cp ${SSH_PRIVATE_KEY} /tmp/ssh_key
+    - echo >> /tmp/ssh_key
+    - chmod 400 /tmp/ssh_key
+    - ssh-add /tmp/ssh_key
+    - mkdir -p ~/.ssh
+    - chmod 700 ~/.ssh
+    - ssh-keyscan -H ${APP_HOST} >> ~/.ssh/known_hosts
   script:
-    # Дополнительно устанавливаем rsync
-    - apt-get install -y rsync
-    # Меняем путь назначения на /opt/front
-    - rsync -av --progress dist/ front@${APP_HOST}:/opt/front/
+    # Используем tar + ssh для копирования файлов
+    - cd dist && tar czf - . | ssh front@${APP_HOST} 'cd /opt/front && tar xzf -'
   # Указываем, что нам нужны артефакты из задачи по сборке приложения
   needs:
     - build:app

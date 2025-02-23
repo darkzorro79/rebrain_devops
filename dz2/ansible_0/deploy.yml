@@ -214,8 +214,8 @@
 
     - name: Создание systemd сервиса для бэкенда
       template:
-        src: templates/backend.service.j2
-        dest: /etc/systemd/system/backend.service
+        src: templates/back.service.j2
+        dest: /etc/systemd/system/back.service
       notify: reload systemd
 
     - name: Запуск и включение сервиса бэкенда

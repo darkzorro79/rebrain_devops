@@ -36,8 +36,10 @@ deploy:app:
   - 'command -v ssh-agent >/dev/null || ( apt-get update -y && apt-get install openssh-client -y )'
   - eval $(ssh-agent -s)
   - cat ${SSH_PRIVATE_KEY}
-  - chmod 400 ${SSH_PRIVATE_KEY}
-  - ssh-add ${SSH_PRIVATE_KEY}
+  - cp ${SSH_PRIVATE_KEY} /tmp/ssh_key
+  - echo >> /tmp/ssh_key  # добавляем пустую строку
+  - chmod 400 /tmp/ssh_key
+  - ssh-add /tmp/ssh_key
   - mkdir -p ~/.ssh
   - chmod 700 ~/.ssh
   - ssh-keyscan -H ${APP_HOST} >> ~/.ssh/known_hosts

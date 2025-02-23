@@ -60,9 +60,12 @@ deploy:app:
   # Для дебага - выводим значение нашей переменной SSH_PRIVATE_KEY
   - cat ${SSH_PRIVATE_KEY}
   # Выставляем права на файл 0400
-  - chmod 400 ${SSH_PRIVATE_KEY}
+  - cp ${SSH_PRIVATE_KEY} /tmp/ssh_key
+  - echo >> /tmp/ssh_key  # добавляем пустую строку
+  - chmod 400 /tmp/ssh_key
   # Добавляем приватный ключ в ssh-agent
-  - ssh-add ${SSH_PRIVATE_KEY}
+  - ssh-add /tmp/ssh_key
+  #- ssh-add ${SSH_PRIVATE_KEY}
   # Создаем директорию для ssh - там будут храниться known_hosts
   - mkdir -p ~/.ssh
   # Задаем права на директорию 700
@@ -74,7 +77,7 @@ deploy:app:
     # Копируем наш бинарный файл `app` на сервер под пользователем `back`
     - scp app back@$APP_HOST:/tmp/app
     # Подключаемся к серверу, останавливаем приложение, перемещаем бинарник и запускаем сервис
-    - ssh back@$APP_HOST 'sudo systemctl stop backend && mv /tmp/app /opt/back/app && sudo systemctl start backend'
+    - ssh back@$APP_HOST 'sudo systemctl stop back && mv /tmp/app /opt/back/app && sudo systemctl start back'
   # Говорим гитлабу, что нам необходимы артефакты из задачи по сборке, которые мы там сохраняли
   # Гилаб при запуске этой задаче заберет сохраненные артефакты и положит их в текущую директорию
   # В нашем случае это файл `app`

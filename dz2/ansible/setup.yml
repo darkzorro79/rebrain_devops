@@ -92,11 +92,11 @@
     - name: Configure sudoers
       lineinfile:
         path: /etc/sudoers
-        line: "{{ item }} ALL=(ALL) NOPASSWD: /bin/systemctl restart {{ item }}"
+        line: "{{ item.user }} ALL=(ALL) NOPASSWD: /bin/systemctl stop {{ item.service }}, /bin/systemctl start {{ item.service }}, /bin/mv /tmp/app /opt/{{ item.user }}/app"
         validate: 'visudo -cf %s'
       loop:
-        - back
-        - worker
+        - { user: "back", service: "backend" }
+        - { user: "worker", service: "worker" }
 
     - name: Create repos directory
       file:
