@@ -149,7 +149,7 @@
     - name: Configure git for repositories
       shell: |
         cd {{ item.path }} && \
-        git config --local user.email "ansible@example.com" && \
+        git config --local user.email "admin@kropalik.ru" && \
         git config --local user.name "Ansible Automation" && \
         git remote set-url origin "https://oauth2:{{ vault_gitlab_token }}@rbr-devops-workshop.gitlab.yandexcloud.net/admin-kropalik-ru/{{ item.name }}.git"
       loop: "{{ projects }}"
