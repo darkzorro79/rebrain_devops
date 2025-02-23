@@ -95,7 +95,7 @@
         line: "{{ item.user }} ALL=(ALL) NOPASSWD: /bin/systemctl stop {{ item.service }}, /bin/systemctl start {{ item.service }}, /bin/mv /tmp/app /opt/{{ item.user }}/app"
         validate: 'visudo -cf %s'
       loop:
-        - { user: "back", service: "backend" }
+        - { user: "back", service: "back" }
         - { user: "worker", service: "worker" }
 
     - name: Create repos directory
