@@ -1,0 +1,63 @@
+stages:
+  - test
+  - build
+  - deploy
+
+test:lint:
+  stage: test
+  image: node:18-alpine
+  allow_failure: true
+  script:
+    - npm ci
+    - npm run lint
+
+build:image:
+  stage: build
+  image:
+    name: gcr.io/kaniko-project/executor:debug
+    entrypoint: [ "" ]
+  variables:
+    # https://github.com/GoogleContainerTools/kaniko/issues/2751
+    GODEBUG: "http2client=0"
+  before_script:
+    - echo "{\"auths\":{\"${CI_REGISTRY}\":{\"auth\":\"$(printf "%s:%s" "${CI_REGISTRY_USER}" "${CI_REGISTRY_PASSWORD}" | base64 | tr -d '\n')\"}}}" > /kaniko/.docker/config.json
+  script:
+    - /kaniko/executor
+      --context "."
+      --dockerfile "Dockerfile"
+      --destination "${CI_REGISTRY_IMAGE}:${CI_COMMIT_SHORT_SHA}"
+      --cache=true
+      --cache-repo "${CI_REGISTRY_IMAGE}/cache"
+      --cache-run-layers
+      --cache-ttl 336h
+      --compressed-caching=false
+
+deploy:app:
+  stage: deploy
+  image: ubuntu:24.04
+  before_script:
+    - apt-get update && apt-get install -y openssh-client libssl3 ca-certificates
+    - eval $(ssh-agent -s)
+    - cat ${SSH_PRIVATE_KEY}
+    - cp ${SSH_PRIVATE_KEY} /tmp/ssh_key
+    - echo >> /tmp/ssh_key  # добавляем пустую строку
+    - chmod 400 /tmp/ssh_key
+    - ssh-add /tmp/ssh_key
+    - mkdir -p ~/.ssh
+    - chmod 700 ~/.ssh
+    - ssh-keyscan -H $DEPLOY_HOST >> ~/.ssh/known_hosts
+  script:
+    # Создаем Docker config.json с учетными данными для реестра
+    - |
+      echo "{\"auths\":{\"${CI_REGISTRY}\":{\"auth\":\"$(printf "%s:%s" "${CI_REGISTRY_USER}" "${CI_REGISTRY_PASSWORD}" | base64 | tr -d '\n')\"}}}" > /tmp/docker_config.json
+    - cat /tmp/docker_config.json
+    # Создаем директорию .docker на удаленном сервере
+    - ssh $DEPLOY_USER@$DEPLOY_HOST "mkdir -p ~/.docker"
+    # Копируем конфигурацию на удаленный сервер
+    - scp /tmp/docker_config.json $DEPLOY_USER@$DEPLOY_HOST:~/.docker/config.json
+    # Теперь можем выполнять docker pull без явной авторизации
+    - ssh $DEPLOY_USER@$DEPLOY_HOST "docker pull ${CI_REGISTRY_IMAGE}:${CI_COMMIT_SHORT_SHA}"
+    - ssh $DEPLOY_USER@$DEPLOY_HOST "docker tag ${CI_REGISTRY_IMAGE}:${CI_COMMIT_SHORT_SHA} front:latest"
+    - ssh $DEPLOY_USER@$DEPLOY_HOST "docker-compose -f /opt/docker-compose.yml up -d front"
+  needs:
+    - build:image 

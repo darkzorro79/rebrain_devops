@@ -1,0 +1,322 @@
+---
+- name: Развертывание приложения в Docker-контейнерах
+  hosts: all
+  become: yes
+  vars:
+    gitlab_url: "https://rbr-devops-workshop.gitlab.yandexcloud.net"
+    docker_network: "app"
+    db_name: "todo"
+    db_user: "todo"
+    db_password: "{{ vault_db_password }}"
+    repos:
+      - { name: "back", path: "/opt/repos/back" }
+      - { name: "front", path: "/opt/repos/front" }
+      - { name: "worker", path: "/opt/repos/worker" }
+    # Используем переменные из vault напрямую
+    gitlab_token: "{{ vault_gitlab_token }}"
+    registry_token: "{{ vault_registry_token }}"
+
+  tasks:
+    - name: Установка необходимых пакетов
+      apt:
+        name: "{{ item }}"
+        state: present
+        update_cache: yes
+      loop:
+        - apt-transport-https
+        - ca-certificates
+        - curl
+        - gnupg
+        - software-properties-common
+        - git
+
+    #- name: Добавление GPG ключа Docker
+    #  apt_key:
+    #    url: https://download.docker.com/linux/ubuntu/gpg
+    #    state: present
+
+    #- name: Добавление репозитория Docker
+    #  apt_repository:
+    #    repo: "deb [arch=amd64] https://download.docker.com/linux/ubuntu {{ ansible_distribution_release }} stable"
+    #    state: present
+
+    #- name: Установка Docker
+    #  apt:
+    #    name: "{{ item }}"
+    #    state: present
+    #    update_cache: yes
+    #  loop:
+    #    - docker-ce
+    #    - docker-ce-cli
+    #    - containerd.io
+    #    - docker-compose-plugin
+
+    - name: Установка docker-compose
+      get_url:
+        url: https://github.com/docker/compose/releases/download/v2.33.1/docker-compose-{{ ansible_system | lower }}-{{ ansible_architecture }}
+        dest: /usr/local/bin/docker-compose
+        mode: '0755'
+
+    - name: Создание .ssh директории для пользователя из inventory
+      file:
+        path: "/home/{{ ansible_user }}/.ssh"
+        state: directory
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        mode: '0700'
+
+    - name: Создание SSH ключа для пользователя из inventory
+      openssh_keypair:
+        path: "/home/{{ ansible_user }}/.ssh/id_ed25519"
+        type: ed25519
+        state: present
+        force: no
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        mode: '0600'
+
+    - name: Чтение публичного ключа
+      slurp:
+        src: "/home/{{ ansible_user }}/.ssh/id_ed25519.pub"
+      register: ssh_pub_key
+
+    - name: Настройка авторизованных ключей для пользователя из inventory
+      authorized_key:
+        user: "{{ ansible_user }}"
+        state: present
+        key: "{{ ssh_pub_key.content | b64decode }}"
+
+    - name: Добавление пользователя из inventory в группу docker
+      user:
+        name: "{{ ansible_user }}"
+        groups: docker
+        append: yes
+
+    - name: Клонирование репозиториев
+      git:
+        repo: "https://oauth2:{{ gitlab_token }}@rbr-devops-workshop.gitlab.yandexcloud.net/admin-kropalik-ru/{{ item.name }}.git"
+        dest: "{{ item.path }}"
+        accept_hostkey: yes
+      loop: "{{ repos }}"
+
+    - name: Создание Dockerfile для back
+      template:
+        src: templates/back-dockerfile.j2
+        dest: "{{ repos[0].path }}/Dockerfile"
+        mode: '0644'
+
+    - name: Создание Dockerfile для front
+      template:
+        src: templates/front-dockerfile.j2
+        dest: "{{ repos[1].path }}/Dockerfile"
+        mode: '0644'
+
+    - name: Создание nginx конфигурации для front
+      template:
+        src: templates/front-nginx.j2
+        dest: "{{ repos[1].path }}/.default.conf"
+        mode: '0644'
+
+    - name: Создание Dockerfile для worker
+      template:
+        src: templates/worker-dockerfile.j2
+        dest: "{{ repos[2].path }}/Dockerfile"
+        mode: '0644'
+
+    # Новые задачи: сборка Docker образов локально
+    - name: Сборка Docker образа для back
+      command: docker build -t back:latest .
+      args:
+        chdir: "{{ repos[0].path }}"
+      register: back_build
+      changed_when: back_build.rc == 0
+
+    - name: Сборка Docker образа для front
+      command: docker build -t front:latest .
+      args:
+        chdir: "{{ repos[1].path }}"
+      register: front_build
+      changed_when: front_build.rc == 0
+
+    - name: Сборка Docker образа для worker
+      command: docker build -t worker:latest .
+      args:
+        chdir: "{{ repos[2].path }}"
+      register: worker_build
+      changed_when: worker_build.rc == 0
+
+    - name: Создание docker-compose.yml
+      template:
+        src: templates/docker-compose.yml.j2
+        dest: /opt/docker-compose.yml
+        mode: '0644'
+
+    - name: Создание nginx конфигурации
+      template:
+        src: templates/nginx.conf.j2
+        dest: /etc/nginx/sites-available/app.conf
+        mode: '0644'
+
+    - name: Удаление дефолтной конфигурации Nginx
+      file:
+        path: /etc/nginx/sites-enabled/default
+        state: absent
+
+    - name: Активация конфигурации nginx
+      file:
+        src: /etc/nginx/sites-available/app.conf
+        dest: /etc/nginx/sites-enabled/app.conf
+        state: link
+
+    - name: Проверка конфигурации nginx
+      command: nginx -t
+      register: nginx_check
+      changed_when: false
+      ignore_errors: true
+
+    - name: Вывод результата проверки Nginx
+      debug:
+        var: nginx_check.stdout_lines
+      when: nginx_check.stdout_lines is defined
+
+    - name: Вывод ошибок проверки Nginx
+      debug:
+        var: nginx_check.stderr_lines
+      when: nginx_check.stderr_lines is defined
+
+    - name: Перезапуск nginx
+      service:
+        name: nginx
+        state: restarted
+      when: nginx_check.rc == 0
+
+    - name: Создание сети Docker
+      command: docker network create {{ docker_network }}
+      register: docker_network_result
+      failed_when: docker_network_result.rc != 0 and 'already exists' not in docker_network_result.stderr
+      changed_when: docker_network_result.rc == 0
+
+    - name: Запуск контейнеров через docker-compose
+      command: docker-compose -f /opt/docker-compose.yml up -d
+      args:
+        chdir: /opt
+
+    - name: Ожидание запуска PostgreSQL (10 секунд)
+      wait_for:
+        timeout: 10
+      
+    - name: Создание пользователя
+      command: docker exec postgres psql -c "CREATE USER {{ db_user }} WITH ENCRYPTED PASSWORD '{{ db_password }}';" -U postgres
+      register: create_user
+      ignore_errors: yes
+      changed_when: false
+
+    - name: Создание БД с владельцем
+      command: docker exec postgres psql -c "CREATE DATABASE {{ db_name }} OWNER {{ db_user }};" -U postgres
+      register: create_db
+      ignore_errors: yes
+      changed_when: false
+
+    - name: Установка расширения uuid-ossp
+      command: docker exec postgres psql -c "CREATE EXTENSION IF NOT EXISTS \"uuid-ossp\";" -d {{ db_name }} -U postgres
+      register: create_extension
+      ignore_errors: yes
+      changed_when: false
+
+    - name: Сброс состояния миграций (если база помечена как "грязная")
+      command: docker exec postgres psql -c "DROP TABLE IF EXISTS schema_migrations;" -d {{ db_name }} -U postgres
+      register: reset_migrations
+      ignore_errors: yes
+      changed_when: false
+
+    - name: Чтение приватного ключа для CI/CD
+      command: cat "/home/{{ ansible_user }}/.ssh/id_ed25519"
+      register: ssh_private_key
+      changed_when: false
+
+    - name: Установка CI/CD переменных в GitLab (SSH_PRIVATE_KEY)
+      uri:
+        url: "{{ gitlab_url }}/api/v4/projects/admin-kropalik-ru%2F{{ item }}/variables"
+        method: POST
+        headers:
+          PRIVATE-TOKEN: "{{ gitlab_token }}"
+        body_format: json
+        body:
+          variable_type: "file"
+          key: "SSH_PRIVATE_KEY"
+          value: "{{ ssh_private_key.stdout }}"
+        status_code: [201, 400]
+      loop:
+        - back
+        - front
+        - worker
+
+    - name: Установка CI/CD переменных в GitLab (DEPLOY_HOST)
+      uri:
+        url: "{{ gitlab_url }}/api/v4/projects/admin-kropalik-ru%2F{{ item }}/variables"
+        method: POST
+        headers:
+          PRIVATE-TOKEN: "{{ gitlab_token }}"
+        body_format: json
+        body:
+          variable_type: "env_var"
+          key: "DEPLOY_HOST"
+          value: "{{ ansible_host }}"
+        status_code: [201, 400]
+      loop:
+        - back
+        - front
+        - worker
+
+    - name: Установка CI/CD переменных в GitLab (DEPLOY_USER)
+      uri:
+        url: "{{ gitlab_url }}/api/v4/projects/admin-kropalik-ru%2F{{ item }}/variables"
+        method: POST
+        headers:
+          PRIVATE-TOKEN: "{{ gitlab_token }}"
+        body_format: json
+        body:
+          variable_type: "env_var"
+          key: "DEPLOY_USER"
+          value: "{{ ansible_user }}"
+        status_code: [201, 400]
+      loop:
+        - back
+        - front
+        - worker
+
+    - name: Установка CI/CD переменных в GitLab (REGISTRY_TOKEN)
+      uri:
+        url: "{{ gitlab_url }}/api/v4/projects/admin-kropalik-ru%2F{{ item }}/variables"
+        method: POST
+        headers:
+          PRIVATE-TOKEN: "{{ gitlab_token }}"
+        body_format: json
+        body:
+          variable_type: "env_var"
+          key: "REGISTRY_TOKEN"
+          value: "{{ registry_token }}"
+        status_code: [201, 400]
+      loop:
+        - back
+        - front
+        - worker
+
+    - name: Создание CI/CD конфигураций
+      template:
+        src: templates/{{ item.name }}-ci-cd.yml.j2
+        dest: "{{ item.path }}/.gitlab-ci.yml"
+        owner: root
+        group: root
+        mode: '0644'
+      loop: "{{ repos }}"
+
+    - name: Отправка CI/CD конфигураций в репозитории
+      shell: |
+        cd {{ item.path }} && \
+        git add .gitlab-ci.yml Dockerfile {% if item.name == 'front' %}.default.conf{% endif %} && \
+        git config --global user.email "admin@kropalik.ru" && \
+        git config --global user.name "Ansible Automation" && \
+        git commit -m "Add Docker and CI/CD configuration" || true && \
+        git push origin main || true
+      loop: "{{ repos }}" 

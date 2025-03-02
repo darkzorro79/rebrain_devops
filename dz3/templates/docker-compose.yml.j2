@@ -1,0 +1,61 @@
+version: '3'
+
+networks:
+  {{ docker_network }}:
+    external: true
+
+services:
+  postgres:
+    image: postgres:16
+    container_name: postgres
+    restart: always
+    networks:
+      - {{ docker_network }}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    environment:
+      - POSTGRES_PASSWORD=postgres
+  
+  # Для back, front и worker используем контейнеры, которые будут управляться через CI/CD
+  # Здесь их конфигурация нужна только для первоначального запуска
+  
+  back:
+    image: back:latest
+    container_name: back
+    restart: always
+    networks:
+      - {{ docker_network }}
+    environment:
+      - POSTGRES_URI=postgres://{{ db_user }}:{{ db_password }}@postgres:5432/{{ db_name }}?sslmode=disable
+      - LISTEN_ADDR=:8080
+      - MIGRATIONS_DIR=migrations
+      - APP_VERSION=${CI_COMMIT_SHORT_SHA:-v0.0.1}
+    depends_on:
+      - postgres
+    ports:
+      - "127.0.0.1:8080:8080"
+  
+  front:
+    image: front:latest
+    container_name: front
+    restart: always
+    networks:
+      - {{ docker_network }}
+    depends_on:
+      - back
+    ports:
+      - "127.0.0.1:9090:80"
+  
+  worker:
+    image: worker:latest
+    container_name: worker
+    restart: always
+    networks:
+      - {{ docker_network }}
+    environment:
+      - POSTGRES_URI=postgres://{{ db_user }}:{{ db_password }}@postgres:5432/{{ db_name }}?sslmode=disable
+    depends_on:
+      - postgres
+
+volumes:
+  postgres_data: 

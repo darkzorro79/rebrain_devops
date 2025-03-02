@@ -1,0 +1,15 @@
+server {
+    listen 80;
+    server_name _;
+
+    # Перенаправление запросов к API на back-сервис
+    location /api/ {
+        rewrite ^/api/(.*)$ /$1 break;
+        proxy_pass http://127.0.0.1:8080/;
+    }
+
+    # Все остальные запросы направляем на front-сервис
+    location / {
+        proxy_pass http://127.0.0.1:9090/;
+    }
+} 
