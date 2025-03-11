@@ -3,13 +3,26 @@ stages:
   - build
   - deploy
 
+# Задача на запуск линтера
 test:lint:
+  # Относится к стадии тестирования
   stage: test
-  image: golang:1.23-alpine3.20
+  # Разрешаем фейлится данной задаче
   allow_failure: true
+  before_script:
+    # Устанавливаем зависимости для сборки
+    - apt-get update && apt-get install -y curl wget python3-venv build-essential libpq-dev python3-dev
+    # Создаем виртуальное окружение
+    - python3 -m venv venv
+    # Активируем виртуальное окружение
+    - source venv/bin/activate
+    # Устанавливаем дополнительно pylint
+    - pip3 install pylint
   script:
-    - go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
-    - golangci-lint run
+    # Устанавливаем зависимости приложения
+    - pip3 install -r requirements.txt
+    # Запускаем проверку кода
+    - pylint *.py
 
 build:image:
   stage: build
