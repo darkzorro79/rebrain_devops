@@ -1,0 +1,20 @@
+---
+- name: Import inventory information
+  hosts: all
+  gather_facts: no
+  tasks:
+    - name: Display host information
+      debug:
+        msg: "Host {{ inventory_hostname }} has IP {{ ansible_host }}"
+      when: inventory_hostname == 'vm-1'
+
+- name: Setup GitLab repositories
+  hosts: vm-1
+  gather_facts: yes
+  vars:
+    # Используем vault_gitlab_token из vault.yml
+    gitlab_token: "{{ vault_gitlab_token }}"
+    certs_dest_path: "/etc/docker/tls"
+    local_certs_path: "/tmp/certs"
+  roles:
+    - gitlab-setup 

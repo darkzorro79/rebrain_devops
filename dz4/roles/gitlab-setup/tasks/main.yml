@@ -1,0 +1,353 @@
+---
+# Основные задачи роли gitlab-setup
+
+# Существующие задачи для клонирования и обновления репозиториев
+- name: Create temporary directory
+  tempfile:
+    state: directory
+  register: temp_dir
+
+- name: Clone back repository
+  git:
+    repo: "https://oauth2:{{ gitlab_token }}@rbr-devops-workshop.gitlab.yandexcloud.net/admin-kropalik-ru/back.git"
+    dest: "{{ temp_dir.path }}/back"
+    accept_hostkey: yes
+    force: yes
+
+- name: Clone front repository
+  git:
+    repo: "https://oauth2:{{ gitlab_token }}@rbr-devops-workshop.gitlab.yandexcloud.net/admin-kropalik-ru/front.git"
+    dest: "{{ temp_dir.path }}/front"
+    accept_hostkey: yes
+    force: yes
+
+- name: Clone worker repository
+  git:
+    repo: "https://oauth2:{{ gitlab_token }}@rbr-devops-workshop.gitlab.yandexcloud.net/admin-kropalik-ru/worker.git"
+    dest: "{{ temp_dir.path }}/worker"
+    accept_hostkey: yes
+    force: yes
+
+# Копирование Dockerfile и CI/CD конфигурации
+- name: Set Docker host variable
+  set_fact:
+    docker_host_var: "{{ hostvars['vm-1'].ansible_host | default('91.219.27.191') }}"
+
+- name: Copy Dockerfile and CI/CD config for back
+  template:
+    src: "{{ item.src }}"
+    dest: "{{ temp_dir.path }}/back/{{ item.dest }}"
+  with_items:
+    - { src: "back-dockerfile.j2", dest: "Dockerfile" }
+    - { src: "back-ci-cd.yml.j2", dest: ".gitlab-ci.yml" }
+  vars:
+    docker_host: "{{ docker_host_var }}"
+
+- name: Copy Dockerfile and CI/CD config for front
+  template:
+    src: "{{ item.src }}"
+    dest: "{{ temp_dir.path }}/front/{{ item.dest }}"
+  with_items:
+    - { src: "front-dockerfile.j2", dest: "Dockerfile" }
+    - { src: "front-ci-cd.yml.j2", dest: ".gitlab-ci.yml" }
+    - { src: "front-nginx.j2", dest: ".default.conf" }
+  vars:
+    docker_host: "{{ docker_host_var }}"
+
+- name: Copy Dockerfile and CI/CD config for worker
+  template:
+    src: "{{ item.src }}"
+    dest: "{{ temp_dir.path }}/worker/{{ item.dest }}"
+  with_items:
+    - { src: "worker-dockerfile.j2", dest: "Dockerfile" }
+    - { src: "worker-ci-cd.yml.j2", dest: ".gitlab-ci.yml" }
+  vars:
+    docker_host: "{{ docker_host_var }}"
+
+# Коммит и пуш изменений
+- name: Configure git for back repository
+  shell: |
+    cd {{ temp_dir.path }}/back
+    git config user.email "admin@kropalik.ru"
+    git config user.name "Ansible Automation"
+    git add Dockerfile .gitlab-ci.yml
+    git commit -m "Add Dockerfile and CI/CD configuration"
+    git config credential.helper '!f() { echo "username=oauth2"; echo "password={{ gitlab_token }}"; }; f'
+    git push origin main
+  environment:
+    GIT_SSL_NO_VERIFY: "true"
+
+- name: Configure git for front repository
+  shell: |
+    cd {{ temp_dir.path }}/front
+    git config user.email "admin@kropalik.ru"
+    git config user.name "Ansible Automation"
+    git add Dockerfile .gitlab-ci.yml .default.conf
+    git commit -m "Add Dockerfile, Nginx config and CI/CD configuration"
+    git config credential.helper '!f() { echo "username=oauth2"; echo "password={{ gitlab_token }}"; }; f'
+    git push origin main
+  environment:
+    GIT_SSL_NO_VERIFY: "true"
+
+- name: Configure git for worker repository
+  shell: |
+    cd {{ temp_dir.path }}/worker
+    git config user.email "admin@kropalik.ru"
+    git config user.name "Ansible Automation"
+    git add Dockerfile .gitlab-ci.yml
+    git commit -m "Add Dockerfile and CI/CD configuration"
+    git config credential.helper '!f() { echo "username=oauth2"; echo "password={{ gitlab_token }}"; }; f'
+    git push origin main
+  environment:
+    GIT_SSL_NO_VERIFY: "true"
+
+# Добавление APP_HOST переменной в проекты
+- name: Add APP_HOST variable for back project
+  uri:
+    url: "https://rbr-devops-workshop.gitlab.yandexcloud.net/api/v4/projects/admin-kropalik-ru%2Fback/variables"
+    headers:
+      Private-Token: "{{ gitlab_token }}"
+    method: POST
+    body_format: json
+    body:
+      key: "APP_HOST"
+      value: "{{ docker_host_var }}"
+      protected: true
+    status_code: 200, 201, 400
+  ignore_errors: yes
+
+- name: Add APP_HOST variable for front project
+  uri:
+    url: "https://rbr-devops-workshop.gitlab.yandexcloud.net/api/v4/projects/admin-kropalik-ru%2Ffront/variables"
+    headers:
+      Private-Token: "{{ gitlab_token }}"
+    method: POST
+    body_format: json
+    body:
+      key: "APP_HOST"
+      value: "{{ docker_host_var }}"
+      protected: true
+    status_code: 200, 201, 400
+  ignore_errors: yes
+
+- name: Add APP_HOST variable for worker project
+  uri:
+    url: "https://rbr-devops-workshop.gitlab.yandexcloud.net/api/v4/projects/admin-kropalik-ru%2Fworker/variables"
+    headers:
+      Private-Token: "{{ gitlab_token }}"
+    method: POST
+    body_format: json
+    body:
+      key: "APP_HOST"
+      value: "{{ docker_host_var }}"
+      protected: true
+    status_code: 200, 201, 400
+  ignore_errors: yes
+
+# Отладка доступа к файлам сертификатов
+- name: Debug certificate files permissions
+  shell: |
+    echo "Current user and groups:"
+    id
+    echo "Docker TLS directory contents:"
+    sudo ls -la {{ certs_dest_path }}/
+    echo "Checking CA certificate:"
+    sudo ls -la {{ certs_dest_path }}/ca.pem || echo "CA certificate not found"
+    echo "Checking client certificates:"
+    sudo ls -la {{ certs_dest_path }}/back-cert.pem || echo "Back certificate not found"
+    sudo ls -la {{ certs_dest_path }}/front-cert.pem || echo "Front certificate not found"
+    sudo ls -la {{ certs_dest_path }}/worker-cert.pem || echo "Worker certificate not found"
+  register: cert_debug
+  ignore_errors: yes
+
+- name: Display certificate files debug
+  debug:
+    var: cert_debug.stdout_lines
+
+# Чтение содержимого сертификатов в переменные (упрощенный способ)
+- name: Read CA certificate content
+  shell: sudo cat {{ certs_dest_path }}/ca.pem
+  register: ca_cert_content
+  ignore_errors: yes
+
+- name: Read back certificate content
+  shell: sudo cat {{ certs_dest_path }}/back-cert.pem
+  register: back_cert_content
+  ignore_errors: yes
+
+- name: Read back key content
+  shell: sudo cat {{ certs_dest_path }}/back-key.pem
+  register: back_key_content
+  ignore_errors: yes
+
+- name: Read front certificate content
+  shell: sudo cat {{ certs_dest_path }}/front-cert.pem
+  register: front_cert_content
+  ignore_errors: yes
+
+- name: Read front key content
+  shell: sudo cat {{ certs_dest_path }}/front-key.pem
+  register: front_key_content
+  ignore_errors: yes
+
+- name: Read worker certificate content
+  shell: sudo cat {{ certs_dest_path }}/worker-cert.pem
+  register: worker_cert_content
+  ignore_errors: yes
+
+- name: Read worker key content
+  shell: sudo cat {{ certs_dest_path }}/worker-key.pem
+  register: worker_key_content
+  ignore_errors: yes
+
+- name: Set certificate variables
+  set_fact:
+    ca_cert: "{{ ca_cert_content.stdout }}"
+    back_cert: "{{ back_cert_content.stdout }}"
+    back_key: "{{ back_key_content.stdout }}"
+    front_cert: "{{ front_cert_content.stdout }}"
+    front_key: "{{ front_key_content.stdout }}"
+    worker_cert: "{{ worker_cert_content.stdout }}"
+    worker_key: "{{ worker_key_content.stdout }}"
+  ignore_errors: yes
+
+# Добавление TLS сертификатов как переменных проектов в GitLab
+- name: Add CA certificate for back project
+  uri:
+    url: "https://rbr-devops-workshop.gitlab.yandexcloud.net/api/v4/projects/admin-kropalik-ru%2Fback/variables"
+    headers:
+      Private-Token: "{{ gitlab_token }}"
+    method: POST
+    body_format: json
+    body:
+      key: "CA_CERT"
+      value: "{{ ca_cert }}"
+      protected: true
+      variable_type: "file"
+    status_code: 200, 201, 400
+  ignore_errors: yes
+
+- name: Add client certificate for back project
+  uri:
+    url: "https://rbr-devops-workshop.gitlab.yandexcloud.net/api/v4/projects/admin-kropalik-ru%2Fback/variables"
+    headers:
+      Private-Token: "{{ gitlab_token }}"
+    method: POST
+    body_format: json
+    body:
+      key: "CLIENT_CERT"
+      value: "{{ back_cert }}"
+      protected: true
+      variable_type: "file"
+    status_code: 200, 201, 400
+  ignore_errors: yes
+
+- name: Add client key for back project
+  uri:
+    url: "https://rbr-devops-workshop.gitlab.yandexcloud.net/api/v4/projects/admin-kropalik-ru%2Fback/variables"
+    headers:
+      Private-Token: "{{ gitlab_token }}"
+    method: POST
+    body_format: json
+    body:
+      key: "CLIENT_KEY"
+      value: "{{ back_key }}"
+      protected: true
+      variable_type: "file"
+    status_code: 200, 201, 400
+  ignore_errors: yes
+
+- name: Add CA certificate for front project
+  uri:
+    url: "https://rbr-devops-workshop.gitlab.yandexcloud.net/api/v4/projects/admin-kropalik-ru%2Ffront/variables"
+    headers:
+      Private-Token: "{{ gitlab_token }}"
+    method: POST
+    body_format: json
+    body:
+      key: "CA_CERT"
+      value: "{{ ca_cert }}"
+      protected: true
+      variable_type: "file"
+    status_code: 200, 201, 400
+  ignore_errors: yes
+
+- name: Add client certificate for front project
+  uri:
+    url: "https://rbr-devops-workshop.gitlab.yandexcloud.net/api/v4/projects/admin-kropalik-ru%2Ffront/variables"
+    headers:
+      Private-Token: "{{ gitlab_token }}"
+    method: POST
+    body_format: json
+    body:
+      key: "CLIENT_CERT"
+      value: "{{ front_cert }}"
+      protected: true
+      variable_type: "file"
+    status_code: 200, 201, 400
+  ignore_errors: yes
+
+- name: Add client key for front project
+  uri:
+    url: "https://rbr-devops-workshop.gitlab.yandexcloud.net/api/v4/projects/admin-kropalik-ru%2Ffront/variables"
+    headers:
+      Private-Token: "{{ gitlab_token }}"
+    method: POST
+    body_format: json
+    body:
+      key: "CLIENT_KEY"
+      value: "{{ front_key }}"
+      protected: true
+      variable_type: "file"
+    status_code: 200, 201, 400
+  ignore_errors: yes
+
+- name: Add CA certificate for worker project
+  uri:
+    url: "https://rbr-devops-workshop.gitlab.yandexcloud.net/api/v4/projects/admin-kropalik-ru%2Fworker/variables"
+    headers:
+      Private-Token: "{{ gitlab_token }}"
+    method: POST
+    body_format: json
+    body:
+      key: "CA_CERT"
+      value: "{{ ca_cert }}"
+      protected: true
+      variable_type: "file"
+    status_code: 200, 201, 400
+  ignore_errors: yes
+
+- name: Add client certificate for worker project
+  uri:
+    url: "https://rbr-devops-workshop.gitlab.yandexcloud.net/api/v4/projects/admin-kropalik-ru%2Fworker/variables"
+    headers:
+      Private-Token: "{{ gitlab_token }}"
+    method: POST
+    body_format: json
+    body:
+      key: "CLIENT_CERT"
+      value: "{{ worker_cert }}"
+      protected: true
+      variable_type: "file"
+    status_code: 200, 201, 400
+  ignore_errors: yes
+
+- name: Add client key for worker project
+  uri:
+    url: "https://rbr-devops-workshop.gitlab.yandexcloud.net/api/v4/projects/admin-kropalik-ru%2Fworker/variables"
+    headers:
+      Private-Token: "{{ gitlab_token }}"
+    method: POST
+    body_format: json
+    body:
+      key: "CLIENT_KEY"
+      value: "{{ worker_key }}"
+      protected: true
+      variable_type: "file"
+    status_code: 200, 201, 400
+  ignore_errors: yes
+
+- name: Cleanup temporary directory
+  file:
+    path: "{{ temp_dir.path }}"
+    state: absent 

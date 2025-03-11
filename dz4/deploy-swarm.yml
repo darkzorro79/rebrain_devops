@@ -1,0 +1,235 @@
+---
+- name: Deploy Docker Swarm Cluster
+  hosts: webapp
+  become: true
+  roles:
+    - docker-swarm
+
+- name: Create overlay network
+  hosts: vm-1
+  become: true
+  tasks:
+    - name: Create app network
+      docker_network:
+        name: app
+        driver: overlay
+        attachable: yes
+        state: present
+
+- name: Deploy PostgreSQL Stack
+  hosts: vm-1
+  become: true
+  vars_files:
+    - group_vars/all/main.yml
+    - group_vars/all/vault.yml
+  tasks:
+    - name: Create PostgreSQL stack
+      docker_stack:
+        name: postgres
+        compose:
+          - services:
+              postgres:
+                image: postgres:16
+                environment:
+                  POSTGRES_USER: "{{ db_user }}"
+                  POSTGRES_PASSWORD: "{{ vault_db_password }}"
+                  POSTGRES_DB: "{{ db_name }}"
+                volumes:
+                  - postgres_data:/var/lib/postgresql/data
+                networks:
+                  - app
+                deploy:
+                  placement:
+                    constraints:
+                      - node.role == manager
+            volumes:
+              postgres_data: {}
+            networks:
+              app:
+                external: true
+
+    - name: Wait for PostgreSQL container to be running
+      shell: docker service ps postgres_postgres --filter desired-state=running --format "{% raw %}{{.CurrentState}}{% endraw %}" | grep -q Running
+      register: postgres_service
+      until: postgres_service.rc == 0
+      retries: 30
+      delay: 5
+
+    - name: Get PostgreSQL container ID and node
+      shell: docker service ps postgres_postgres --filter desired-state=running --format "{% raw %}{{.Node}} {{.ID}}{% endraw %}" | head -n1
+      register: postgres_container_info
+      changed_when: false
+
+    - name: Set facts about PostgreSQL container
+      set_fact:
+        postgres_node: "{{ postgres_container_info.stdout.split()[0] }}"
+        postgres_id: "{{ postgres_container_info.stdout.split()[1] }}"
+
+    - name: Wait for PostgreSQL to be ready
+      shell: >
+        docker ps -q --filter name=postgres | xargs -I {} docker exec {} pg_isready -U {{ db_user }}
+      register: pg_ready
+      until: pg_ready is not failed
+      retries: 30
+      delay: 5
+
+    - name: Create database extensions
+      shell: >
+        docker ps -q --filter name=postgres | xargs -I {} docker exec {} psql -U {{ db_user }} -d {{ db_name }} -c "CREATE EXTENSION IF NOT EXISTS \"uuid-ossp\";"
+      register: extension_result
+      changed_when: "'CREATE EXTENSION' in extension_result.stdout"
+
+    - name: Check database and user
+      shell: >
+        docker ps -q --filter name=postgres | xargs -I {} docker exec {} psql -U {{ db_user }} -d {{ db_name }} -c "\l+" | grep {{ db_name }} &&
+        docker ps -q --filter name=postgres | xargs -I {} docker exec {} psql -U {{ db_user }} -d {{ db_name }} -c "\du" | grep {{ db_user }}
+      register: db_check
+      changed_when: false
+
+    - name: Display database and user info
+      debug:
+        var: db_check.stdout_lines
+
+    - name: Check PostgreSQL service status
+      shell: docker service ls --filter name=postgres
+      register: postgres_service_status
+      changed_when: false
+
+    - name: Display PostgreSQL service status
+      debug:
+        var: postgres_service_status.stdout_lines
+
+    - name: Check PostgreSQL logs
+      shell: docker service logs postgres_postgres 2>&1 | tail -n 20
+      register: postgres_logs
+      changed_when: false
+
+    - name: Display PostgreSQL logs
+      debug:
+        var: postgres_logs.stdout_lines
+
+- name: Deploy Nginx Stack
+  hosts: vm-1
+  become: true
+  tasks:
+    - name: Create temp directory
+      file:
+        path: /tmp/nginx
+        state: directory
+        mode: '0755'
+
+    - name: Create nginx configuration from template
+      template:
+        src: templates/nginx.conf.j2
+        dest: /tmp/nginx/nginx.conf
+        mode: '0644'
+
+    - name: Create nginx config in Docker
+      shell: |
+        docker config rm nginx.conf || true
+        docker config create nginx.conf /tmp/nginx/nginx.conf
+      register: nginx_config
+      changed_when: true
+
+    - name: Cleanup temp files
+      file:
+        path: /tmp/nginx
+        state: absent
+
+    - name: Deploy nginx stack
+      docker_stack:
+        name: nginx
+        compose:
+          - services:
+              nginx:
+                image: nginx:latest
+                ports:
+                  - "80:80"
+                configs:
+                  - source: nginx.conf
+                    target: /etc/nginx/conf.d/default.conf
+                    mode: 0440
+                networks:
+                  - app
+                deploy:
+                  placement:
+                    constraints:
+                      - node.role == manager
+                  restart_policy:
+                    condition: any
+                    delay: 5s
+                    max_attempts: 3
+            networks:
+              app:
+                external: true
+            configs:
+              nginx.conf:
+                external: true
+
+    - name: Wait for nginx to be ready
+      shell: docker service ps nginx_nginx --filter desired-state=running --format "{% raw %}{{.CurrentState}}{% endraw %}" | grep -q Running
+      register: nginx_service
+      until: nginx_service.rc == 0
+      retries: 30
+      delay: 5
+
+- name: Check Deployment Status
+  hosts: vm-1
+  become: true
+  tasks:
+    - name: Check Docker services status
+      shell: docker service ls
+      register: service_status
+      changed_when: false
+
+    - name: Display services status
+      debug:
+        var: service_status.stdout_lines
+
+    - name: Check PostgreSQL container status
+      shell: "docker ps -a --filter name=postgres --format {% raw %}{{.Status}}{% endraw %}"
+      register: postgres_status
+      changed_when: false
+
+    - name: Display PostgreSQL status
+      debug:
+        var: postgres_status.stdout_lines
+
+    - name: Check Nginx container status
+      shell: "docker ps -a --filter name=nginx --format {% raw %}{{.Status}}{% endraw %}"
+      register: nginx_status
+      changed_when: false
+
+    - name: Display Nginx status
+      debug:
+        var: nginx_status.stdout_lines
+
+    - name: Check Nginx logs
+      shell: docker service logs nginx_nginx 2>&1 | tail -n 20
+      register: nginx_logs
+      changed_when: false
+      ignore_errors: yes
+
+    - name: Display Nginx logs
+      debug:
+        var: nginx_logs.stdout_lines
+
+    - name: Check Docker networks
+      shell: docker network ls
+      register: network_status
+      changed_when: false
+
+    - name: Display network status
+      debug:
+        var: network_status.stdout_lines
+
+    - name: Check service logs for errors
+      shell: "docker service ps nginx_nginx --format {% raw %}{{.Error}}{% endraw %} --no-trunc"
+      register: service_error
+      changed_when: false
+      ignore_errors: yes
+
+    - name: Display service errors if any
+      debug:
+        var: service_error.stdout_lines
+      when: service_error.stdout != "" 

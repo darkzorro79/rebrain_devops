@@ -1,0 +1,4 @@
+---
+gitlab_url: https://rbr-devops-workshop.gitlab.yandexcloud.net
+gitlab_user: admin-kropalik-ru
+gitlab_token: "{{ vault_gitlab_token }}" 

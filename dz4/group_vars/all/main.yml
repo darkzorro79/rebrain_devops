@@ -1,0 +1,6 @@
+---
+# PostgreSQL configuration
+db_name: "todo"
+db_user: "todo"
+db_password: "{{ vault_db_password }}"
+db_port: 5432 

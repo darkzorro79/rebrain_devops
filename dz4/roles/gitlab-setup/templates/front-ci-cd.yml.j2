@@ -1,0 +1,93 @@
+stages:
+  - test
+  - build
+  - deploy
+
+variables:
+  DOCKER_HOST: "tcp://{{ docker_host }}:2376"
+  DOCKER_TLS_VERIFY: "1"
+  DOCKER_CERT_PATH: "/certs"
+
+test:lint:
+  stage: test
+  image: node:18-alpine
+  allow_failure: true
+  script:
+    - npm ci
+    - npm run lint
+
+build:image:
+  stage: build
+  image:
+    name: gcr.io/kaniko-project/executor:debug
+    entrypoint: [ "" ]
+  variables:
+    # https://github.com/GoogleContainerTools/kaniko/issues/2751
+    GODEBUG: "http2client=0"
+  before_script:
+    - echo "{\"auths\":{\"${CI_REGISTRY}\":{\"auth\":\"$(printf "%s:%s" "${CI_REGISTRY_USER}" "${CI_REGISTRY_PASSWORD}" | base64 | tr -d '\n')\"}}}" > /kaniko/.docker/config.json
+  script:
+    - /kaniko/executor
+      --context "."
+      --dockerfile "Dockerfile"
+      --destination "${CI_REGISTRY_IMAGE}:${CI_COMMIT_SHORT_SHA}"
+      --cache=true
+      --cache-repo "${CI_REGISTRY_IMAGE}/cache"
+      --cache-run-layers
+      --cache-ttl 336h
+      --compressed-caching=false
+
+deploy:app:
+  stage: deploy
+  image: docker:20.10
+  before_script:
+    - apk add --no-cache jq
+    # Читаем сертификаты из временных файлов и создаем соответствующие .pem файлы
+    - echo "APP_HOST=${APP_HOST}"
+    - mkdir -p /certs
+    - cat ${CA_CERT} > /certs/ca.pem
+    - cat ${CLIENT_CERT} > /certs/cert.pem
+    - cat ${CLIENT_KEY} > /certs/key.pem
+    - chmod 600 /certs/*.pem
+    - ls -la /certs/
+    - echo "Content of certificates:"
+    - echo "ca.pem (первые 10 строк):"
+    - head -10 /certs/ca.pem
+    - echo "cert.pem (первые 10 строк):"
+    - head -10 /certs/cert.pem
+    - echo "key.pem (первые 5 строк):"
+    - head -5 /certs/key.pem
+    # Создаем Docker context с правильными путями к файлам
+    - docker context create server --docker "host=tcp://${APP_HOST}:2376,ca=/certs/ca.pem,cert=/certs/cert.pem,key=/certs/key.pem"
+    - docker context use server
+    - docker context ls
+    # Также устанавливаем переменные окружения для надежности
+    - export DOCKER_HOST="tcp://${APP_HOST}:2376"
+    - export DOCKER_TLS_VERIFY=1
+    - export DOCKER_CERT_PATH=/certs
+  script:
+    - docker info # Проверяем соединение
+    - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
+    - docker pull ${CI_REGISTRY_IMAGE}:${CI_COMMIT_SHORT_SHA}
+    - docker tag ${CI_REGISTRY_IMAGE}:${CI_COMMIT_SHORT_SHA} front:latest
+    - |
+      # Создаем docker-compose.yml для сервиса
+      cat > docker-compose.front.yaml <<EOF
+      version: '3.8'
+      services:
+        front:
+          image: front:latest
+          restart: always
+          networks:
+            - app
+      networks:
+         app:
+           name: app
+           external: true
+      EOF
+    - cat docker-compose.front.yaml
+    - docker stack deploy front -c docker-compose.front.yaml --with-registry-auth
+  needs:
+    - build:image
+  only:
+    - main 

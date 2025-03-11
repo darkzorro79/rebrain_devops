@@ -1,0 +1,295 @@
+---
+# Установка Docker
+- name: Install required packages
+  apt:
+    name:
+      - apt-transport-https
+      - ca-certificates
+      - curl
+      - software-properties-common
+      - python3-pip
+    state: present
+    update_cache: yes
+
+- name: Install Docker Python SDK
+  apt:
+    name:
+      - python3-docker
+      - python3-jsondiff
+    state: present
+    update_cache: yes
+
+#- name: Add Docker GPG key
+#  apt_key:
+#    url: https://download.docker.com/linux/ubuntu/gpg
+    state: present
+
+#- name: Add Docker repository
+#  apt_repository:
+#    repo: deb [arch=amd64] https://download.docker.com/linux/ubuntu {{ ansible_distribution_release }} stable
+#    state: present
+
+#- name: Install Docker
+#  apt:
+#    name: docker-ce
+#    state: present
+#    update_cache: yes
+
+# Настройка TLS для Docker
+- name: Create TLS directory
+  file:
+    path: /etc/docker/tls
+    state: directory
+    mode: '0750'
+  when: inventory_hostname == "vm-1"
+
+# Генерация корневого сертификата (CA)
+- name: Generate CA private key
+  shell: openssl genrsa -out /etc/docker/tls/ca.key 4096
+  args:
+    creates: /etc/docker/tls/ca.key
+  when: inventory_hostname == "vm-1"
+
+- name: Generate CA certificate
+  shell: >
+    openssl req -new -x509 -days 3650 -key /etc/docker/tls/ca.key 
+    -subj '/C=RU/ST=Moscow/L=Moscow/O=Rebrain/OU=IT/CN=CA' 
+    -sha256 -out /etc/docker/tls/ca.crt
+  args:
+    creates: /etc/docker/tls/ca.crt
+  when: inventory_hostname == "vm-1"
+
+# Генерация серверного сертификата
+- name: Generate server private key
+  shell: openssl genrsa -out /etc/docker/tls/server.key 4096
+  args:
+    creates: /etc/docker/tls/server.key
+  when: inventory_hostname == "vm-1"
+
+- name: Generate server CSR
+  shell: >
+    openssl req -subj "/CN=docker-server" -sha256 -new 
+    -key /etc/docker/tls/server.key 
+    -out /etc/docker/tls/server.csr
+  args:
+    creates: /etc/docker/tls/server.csr
+  when: inventory_hostname == "vm-1"
+
+- name: Create server certificate extension file
+  copy:
+    dest: /etc/docker/tls/extfile.cnf
+    content: |
+      subjectAltName = IP:{{ hostvars['vm-1'].ansible_host }},IP:{{ hostvars['vm-2'].ansible_host }},IP:{{ hostvars['vm-3'].ansible_host }},IP:127.0.0.1
+      extendedKeyUsage = serverAuth
+    mode: '0644'
+  when: inventory_hostname == "vm-1"
+
+- name: Generate server certificate
+  shell: >
+    openssl x509 -req -days 3650 -sha256 
+    -in /etc/docker/tls/server.csr 
+    -CA /etc/docker/tls/ca.crt 
+    -CAkey /etc/docker/tls/ca.key 
+    -CAcreateserial 
+    -out /etc/docker/tls/server.crt 
+    -extfile /etc/docker/tls/extfile.cnf
+  args:
+    creates: /etc/docker/tls/server.crt
+  when: inventory_hostname == "vm-1"
+
+# Генерация клиентских сертификатов для CI/CD
+- name: Generate client private keys
+  shell: openssl genrsa -out /etc/docker/tls/{{ item }}.key 4096
+  args:
+    creates: "/etc/docker/tls/{{ item }}.key"
+  loop:
+    - back
+    - front
+    - worker
+  when: inventory_hostname == "vm-1"
+
+- name: Generate client CSRs
+  shell: >
+    openssl req -subj '/CN={{ item }}' -new 
+    -key /etc/docker/tls/{{ item }}.key 
+    -out /etc/docker/tls/{{ item }}.csr
+  args:
+    creates: "/etc/docker/tls/{{ item }}.csr"
+  loop:
+    - back
+    - front
+    - worker
+  when: inventory_hostname == "vm-1"
+
+- name: Create client certificate extension file
+  copy:
+    dest: /etc/docker/tls/extfile-client.cnf
+    content: "extendedKeyUsage = clientAuth"
+    mode: '0644'
+  when: inventory_hostname == "vm-1"
+
+- name: Generate client certificates
+  shell: >
+    openssl x509 -req -days 3650 -sha256 
+    -in /etc/docker/tls/{{ item }}.csr 
+    -CA /etc/docker/tls/ca.crt 
+    -CAkey /etc/docker/tls/ca.key 
+    -CAcreateserial 
+    -out /etc/docker/tls/{{ item }}.crt 
+    -extfile /etc/docker/tls/extfile-client.cnf
+  args:
+    creates: "/etc/docker/tls/{{ item }}.crt"
+  loop:
+    - back
+    - front
+    - worker
+  when: inventory_hostname == "vm-1"
+
+# Создание символических ссылок для совместимости
+- name: Create symlinks for compatibility
+  file:
+    src: "/etc/docker/tls/{{ item.src }}"
+    dest: "/etc/docker/tls/{{ item.dest }}"
+    state: link
+  loop:
+    - { src: "ca.crt", dest: "ca.pem" }
+    - { src: "server.crt", dest: "server-cert.pem" }
+    - { src: "server.key", dest: "server-key.pem" }
+    - { src: "back.crt", dest: "back-cert.pem" }
+    - { src: "back.key", dest: "back-key.pem" }
+    - { src: "front.crt", dest: "front-cert.pem" }
+    - { src: "front.key", dest: "front-key.pem" }
+    - { src: "worker.crt", dest: "worker-cert.pem" }
+    - { src: "worker.key", dest: "worker-key.pem" }
+  when: inventory_hostname == "vm-1"
+
+# Настройка Docker daemon
+- name: Create systemd override directory
+  file:
+    path: /etc/systemd/system/docker.service.d
+    state: directory
+    mode: '0755'
+  when: inventory_hostname == "vm-1"
+
+- name: Configure systemd override
+  copy:
+    dest: /etc/systemd/system/docker.service.d/override.conf
+    content: |
+      [Service]
+      ExecStart=
+      ExecStart=/usr/bin/dockerd --containerd=/run/containerd/containerd.sock
+    mode: '0644'
+  when: inventory_hostname == "vm-1"
+
+- name: Configure Docker daemon with TLS
+  template:
+    src: daemon.json.j2
+    dest: /etc/docker/daemon.json
+    mode: '0644'
+  when: inventory_hostname == "vm-1"
+
+- name: Reload systemd
+  systemd:
+    daemon_reload: yes
+  when: inventory_hostname == "vm-1"
+
+- name: Enable and start Docker service
+  service:
+    name: docker
+    state: started
+    enabled: yes
+
+- name: Wait for Docker to be ready
+  wait_for:
+    path: /var/run/docker.sock
+    state: present
+    timeout: 60
+  when: inventory_hostname == "vm-1"
+
+- name: Check Docker status
+  command: systemctl status docker
+  register: docker_status
+  changed_when: false
+  failed_when: false
+  when: inventory_hostname == "vm-1"
+
+- name: Show Docker logs if service is not running
+  command: journalctl -xeu docker.service
+  register: docker_logs
+  when: inventory_hostname == "vm-1" and docker_status.rc is defined and docker_status.rc != 0
+
+# Перезапуск Docker для применения TLS настроек
+- name: Restart Docker to apply TLS settings
+  systemd:
+    name: docker
+    state: restarted
+  when: inventory_hostname == "vm-1"
+
+# Инициализация Swarm
+- name: Initialize Docker Swarm
+  docker_swarm:
+    state: present
+    advertise_addr: "{{ local_ip | default(ansible_default_ipv4.address) }}"
+  when: inventory_hostname == "vm-1"
+  register: swarm_info
+
+- name: Get swarm worker token
+  shell: docker swarm join-token -q worker
+  register: worker_token
+  changed_when: false
+  when: inventory_hostname == "vm-1"
+
+- name: Get swarm manager token
+  shell: docker swarm join-token -q manager
+  register: manager_token
+  changed_when: false
+  when: inventory_hostname == "vm-1"
+
+- name: Set tokens as facts on vm-1
+  set_fact:
+    swarm_worker_token: "{{ worker_token.stdout }}"
+    swarm_manager_token: "{{ manager_token.stdout }}"
+  when: inventory_hostname == "vm-1"
+
+- name: Share tokens with other hosts
+  set_fact:
+    swarm_worker_token: "{{ hostvars['vm-1']['swarm_worker_token'] }}"
+    swarm_manager_token: "{{ hostvars['vm-1']['swarm_manager_token'] }}"
+  when: inventory_hostname != "vm-1"
+
+# Присоединение остальных узлов
+- name: Join swarm as manager
+  docker_swarm:
+    state: join
+    advertise_addr: "{{ local_ip }}"
+    join_token: "{{ swarm_manager_token }}"
+    remote_addrs: [ "{{ hostvars['vm-1'].local_ip }}:2377" ]
+  when: inventory_hostname != "vm-1" and inventory_hostname in groups['managers']
+
+- name: Join swarm as worker
+  docker_swarm:
+    state: join
+    advertise_addr: "{{ local_ip }}"
+    join_token: "{{ swarm_worker_token }}"
+    remote_addrs: [ "{{ hostvars['vm-1'].local_ip }}:2377" ]
+  when: inventory_hostname in groups['workers']
+
+# Проверка статуса узлов
+- name: Check swarm status
+  shell: docker node ls
+  register: node_status
+  changed_when: false
+  when: inventory_hostname == "vm-1"
+
+- name: Display swarm nodes
+  debug:
+    var: node_status.stdout_lines
+  when: inventory_hostname == "vm-1"
+
+# Создание overlay сети
+- name: Create app network
+  docker_network:
+    name: app
+    driver: overlay
+    attachable: yes
+  when: inventory_hostname == "vm-1" 

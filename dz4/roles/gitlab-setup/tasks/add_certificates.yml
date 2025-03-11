@@ -1,0 +1,53 @@
+---
+# Задачи для добавления сертификатов в переменные проектов GitLab
+
+- name: Encode certificate bundles to base64
+  shell: cat {{ certs_dest_path }}/{{ item.name }}-bundle.tar.gz | base64 -w 0
+  register: certs_base64
+  loop: "{{ projects }}"
+  
+- name: Get project IDs from GitLab
+  uri:
+    url: "{{ gitlab_url }}/api/v4/projects?search={{ item.name }}"
+    headers:
+      Private-Token: "{{ gitlab_token }}"
+    method: GET
+  register: project_search
+  loop: "{{ projects }}"
+
+- name: Add TLS certificate bundle as project variable
+  uri:
+    url: "{{ gitlab_url }}/api/v4/projects/{{ item.0.json[0].id }}/variables"
+    headers:
+      Private-Token: "{{ gitlab_token }}"
+    method: POST
+    body_format: json
+    body:
+      key: "DOCKER_TLS_BUNDLE"
+      value: "{{ item.1.stdout }}"
+      protected: true
+      masked: true
+    status_code: 200, 201
+  with_together:
+    - "{{ project_search.results }}"
+    - "{{ certs_base64.results }}"
+  when: item.0.json | length > 0
+  ignore_errors: yes
+
+- name: Update TLS certificate bundle if it already exists
+  uri:
+    url: "{{ gitlab_url }}/api/v4/projects/{{ item.0.json[0].id }}/variables/DOCKER_TLS_BUNDLE"
+    headers:
+      Private-Token: "{{ gitlab_token }}"
+    method: PUT
+    body_format: json
+    body:
+      value: "{{ item.1.stdout }}"
+      protected: true
+      masked: true
+    status_code: 200
+  with_together:
+    - "{{ project_search.results }}"
+    - "{{ certs_base64.results }}"
+  when: item.0.json | length > 0
+  ignore_errors: yes 

@@ -1,0 +1,18 @@
+# Используем базовый образ для golang
+FROM golang:1.23-alpine3.20
+
+# Создаём директорию и переходим в неё
+WORKDIR /opt
+
+# Копируем go.mod и go.sum внутрь контейнера
+COPY go.mod go.sum ./
+# Скачиваем зависимости
+RUN go mod download
+
+# Копируем все исходники
+COPY . .
+# Собираем наше приложение
+RUN go build -o /opt/app .
+
+# Указываем точку входа
+ENTRYPOINT ["/opt/app"] 

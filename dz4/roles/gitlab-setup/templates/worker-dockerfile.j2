@@ -1,0 +1,19 @@
+# Берём базовый образ с установленным python
+FROM python:3
+
+# Обновляем pip
+RUN python3 -m pip install --upgrade pip
+
+# Создаём и переходим в директорию /opt
+WORKDIR /opt
+
+# Копируем зависимости
+COPY requirements.txt .
+# Устанавливаем зависимости
+RUN pip3 install -r requirements.txt
+
+# Копируем все исходники
+COPY . .
+
+# Указываем точку входа
+ENTRYPOINT ["python3", "/opt/cleaner.py"] 

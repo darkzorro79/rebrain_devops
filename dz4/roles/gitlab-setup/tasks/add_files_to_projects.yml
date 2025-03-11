@@ -1,0 +1,71 @@
+---
+# Задачи для добавления Dockerfile и CI/CD конфигурации в проекты
+
+- name: Create temporary directory for project files
+  tempfile:
+    state: directory
+    suffix: gitlab
+  register: temp_dir
+  
+- name: Create Dockerfiles from templates
+  template:
+    src: "{{ item.dockerfile }}.j2"
+    dest: "{{ temp_dir.path }}/{{ item.name }}_Dockerfile"
+  loop: "{{ projects }}"
+  
+- name: Create CI/CD configuration from template
+  template:
+    src: gitlab-ci.yml.j2
+    dest: "{{ temp_dir.path }}/{{ item.name }}_gitlab-ci.yml"
+  vars:
+    docker_host: "{{ hostvars['vm-1'].ansible_host }}"
+  loop: "{{ projects }}"
+
+- name: Get projects from GitLab
+  uri:
+    url: "{{ gitlab_url }}/api/v4/projects"
+    headers:
+      Private-Token: "{{ gitlab_token }}"
+    method: GET
+  register: gitlab_projects
+  
+- name: Upload Dockerfile to projects
+  uri:
+    url: "{{ gitlab_url }}/api/v4/projects/{{ item.0.id }}/repository/files/Dockerfile"
+    headers:
+      Private-Token: "{{ gitlab_token }}"
+    method: PUT
+    body_format: json
+    body:
+      branch: "main"
+      content: "{{ lookup('file', temp_dir.path + '/' + item.1.name + '_Dockerfile') }}"
+      commit_message: "Add Dockerfile for CI/CD"
+    status_code: 200, 201
+  with_nested:
+    - "{{ gitlab_projects.json | json_query('[?path_with_namespace!=`null`]') }}"
+    - "{{ projects }}"
+  when: item.0.path == item.1.name
+  ignore_errors: yes
+  
+- name: Upload .gitlab-ci.yml to projects
+  uri:
+    url: "{{ gitlab_url }}/api/v4/projects/{{ item.0.id }}/repository/files/.gitlab-ci.yml"
+    headers:
+      Private-Token: "{{ gitlab_token }}"
+    method: PUT
+    body_format: json
+    body:
+      branch: "main"
+      content: "{{ lookup('file', temp_dir.path + '/' + item.1.name + '_gitlab-ci.yml') }}"
+      commit_message: "Add GitLab CI/CD configuration"
+    status_code: 200, 201
+  with_nested:
+    - "{{ gitlab_projects.json | json_query('[?path_with_namespace!=`null`]') }}"
+    - "{{ projects }}"
+  when: item.0.path == item.1.name
+  ignore_errors: yes
+  
+- name: Cleanup temporary directory
+  file:
+    path: "{{ temp_dir.path }}"
+    state: absent 

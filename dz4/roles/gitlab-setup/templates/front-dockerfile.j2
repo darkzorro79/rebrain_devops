@@ -1,0 +1,23 @@
+# Используем базовый образ с nodejs
+FROM node:lts-alpine3.17 as builder
+
+# Создаём и переходим в директорию /opt
+WORKDIR /opt
+
+# Копируем файл с зависимостями в контейнер
+COPY package.json package-lock.json ./
+# Устанавливаем зависимости
+RUN npm install
+
+# Копируем все исходники
+COPY . .
+# Запускаем сборку
+RUN npm run build
+
+# Берём базовый образ nginx
+FROM nginx
+
+# Из контейнера, где мы собрали наше приложение, копируем его в /usr/share/nginx/html
+COPY --from=builder /opt/dist/ /usr/share/nginx/html/
+# Копируем нашу конфигурацию .default.conf
+COPY .default.conf /etc/nginx/conf.d/default.conf 
